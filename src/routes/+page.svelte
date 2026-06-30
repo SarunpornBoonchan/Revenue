@@ -94,8 +94,11 @@
 	let selectedProductId = $state('');
 	let unitCostInput = $state(0);
 	let sellPrice = $state(0);
+	let stockQtyInput = $state(0);
 	let loading = $state(true);
 	let errorMessage = $state('');
+	let productSaveMessage = $state('');
+	let savingProduct = $state(false);
 	let filterMode = $state<FilterMode>('month');
 	let taxRate = $state(5);
 
@@ -136,7 +139,9 @@
 	const selectedProduct = $derived(
 		products.find((product) => product.id === selectedProductId) ?? products[0] ?? null
 	);
-	const profitCalculator = $derived(buildProfitCalculator(selectedProduct, unitCostInput, sellPrice));
+	const profitCalculator = $derived(
+		buildProfitCalculator(selectedProduct, unitCostInput, sellPrice, stockQtyInput)
+	);
 	const barBase = $derived(
 		Math.max(summary.totalIncome, summary.totalExpense + summary.totalCost, 1)
 	);
@@ -312,19 +317,62 @@
 		if (!product) return;
 		unitCostInput = product.cost_price;
 		sellPrice = product.sell_price;
+		stockQtyInput = 0;
+		productSaveMessage = '';
 	}
 
-	function buildProfitCalculator(product: Product | null, unitCostValue: number, unitSellPrice: number) {
+	async function persistSelectedProduct() {
+		if (!selectedProductId) return;
+
+		savingProduct = true;
+		productSaveMessage = '';
+
+		const payload = {
+			cost_price: Math.max(unitCostInput, 0),
+			sell_price: Math.max(sellPrice, 0),
+			stock_qty: Math.max((selectedProduct?.stock_qty ?? 0) + Math.max(stockQtyInput, 0), 0)
+		};
+
+		const { data, error } = await supabase
+			.from('products')
+			.update(payload)
+			.eq('id', selectedProductId)
+			.select('created_at, id, product_name, category, cost_price, sell_price, stock_qty, minimum_stock, unit, active')
+			.single();
+
+		savingProduct = false;
+
+		if (error) {
+			productSaveMessage = `อัปเดตสินค้าไม่สำเร็จ: ${error.message}`;
+			return;
+		}
+
+		const updatedProduct = normalizeProduct(data as unknown as RawRow);
+		products = products.map((product) => (product.id === updatedProduct.id ? updatedProduct : product));
+		applyProductPreset(updatedProduct.id);
+		productSaveMessage = 'บันทึกข้อมูลสินค้าไปที่ Supabase แล้ว';
+	}
+
+	function buildProfitCalculator(
+		product: Product | null,
+		unitCostValue: number,
+		unitSellPrice: number,
+		stockQtyValue: number
+	) {
 		const unitCost = Math.max(unitCostValue || product?.cost_price || 0, 0);
 		const sellingPrice = Math.max(unitSellPrice, 0);
+		const currentStockQty = Math.max(product?.stock_qty || 0, 0);
+		const stockQty = Math.max(currentStockQty + Math.max(stockQtyValue, 0), 0);
 		const grossProfit = sellingPrice - unitCost;
 		const margin = sellingPrice > 0 ? (grossProfit / sellingPrice) * 100 : 0;
 		const markUp = unitCost > 0 ? ((sellingPrice - unitCost) / unitCost) * 100 : 0;
-		const stockValue = (product?.stock_qty ?? 0) * unitCost;
+		const stockValue = stockQty * unitCost;
 
 		return {
 			unitCost,
 			sellingPrice,
+			currentStockQty,
+			stockQty,
 			grossProfit,
 			margin,
 			markUp,
@@ -639,21 +687,43 @@
 						</label>
 						<label class="field">
 							<span>ราคาต้นทุนต่อหน่วย</span>
-							<input type="number" min="0" step="0.01" bind:value={unitCostInput} />
+							<input
+								type="number"
+								min="0"
+								step="0.01"
+								bind:value={unitCostInput}
+								onchange={persistSelectedProduct}
+							/>
 						</label>
 						<label class="field">
 							<span>ราคาขาย</span>
-							<input type="number" min="0" step="0.01" bind:value={sellPrice} />
+							<input
+								type="number"
+								min="0"
+								step="0.01"
+								bind:value={sellPrice}
+								onchange={persistSelectedProduct}
+							/>
+						</label>
+						<label class="field">
+							<span>เพิ่มสต็อก</span>
+							<input
+								type="number"
+								min="0"
+								step="1"
+								bind:value={stockQtyInput}
+								onchange={persistSelectedProduct}
+							/>
 						</label>
 					</div>
 
 					<div class="calculator-summary">
-						<div class="calc-hero" class:negative={profitCalculator.grossProfit <= 10}>
+						<div class="calc-hero" class:negative={profitCalculator.margin <= 10}>
 							<span>กำไรขั้นต้น</span>
-							<strong class:plus={profitCalculator.grossProfit > 10} class:minus={profitCalculator.grossProfit <= 10}>
+							<strong class:plus={profitCalculator.grossProfit > 0} class:minus={profitCalculator.grossProfit <= 0}>
 								{profitCalculator.grossProfit > 0 ? '+' : '-'}{money(Math.abs(profitCalculator.grossProfit))}
 							</strong>
-							<small class:plus={profitCalculator.grossProfit > 10} class:minus={profitCalculator.grossProfit <= 10}>
+							<small class:plus={profitCalculator.margin > 10} class:minus={profitCalculator.margin <= 10}>
 								{profitCalculator.margin > 0 ? '+' : '-'}{Math.abs(profitCalculator.margin).toFixed(1)}%
 							</small>
 						</div>
@@ -669,7 +739,7 @@
 							</article>
 							<article>
 								<span>กำไรต่อชิ้น</span>
-								<strong class:plus={profitCalculator.grossProfit > 10} class:minus={profitCalculator.grossProfit <= 10}>
+								<strong class:plus={profitCalculator.grossProfit > 0} class:minus={profitCalculator.grossProfit <= 0}>
 									{profitCalculator.grossProfit > 0 ? '+' : '-'}{money(Math.abs(profitCalculator.grossProfit))}
 								</strong>
 							</article>
@@ -681,7 +751,11 @@
 							</article>
 							<article>
 								<span>สต็อกปัจจุบัน</span>
-								<strong>{selectedProduct.stock_qty} ชิ้น</strong>
+								<strong>{profitCalculator.currentStockQty} ชิ้น</strong>
+							</article>
+							<article>
+								<span>สต็อกหลังอัปเดต</span>
+								<strong>{profitCalculator.stockQty} ชิ้น</strong>
 							</article>
 							<article>
 								<span>มูลค่าสต็อกตามต้นทุนใหม่</span>
@@ -690,8 +764,11 @@
 						</div>
 
 						<p class="helper-text">
-							ระบบนี้เทียบต้นทุนต่อหน่วยกับราคาขายโดยตรง ถ้าต้นทุนขึ้นหรือลง กำไรต่อชิ้นและเปอร์เซ็นต์จะอัปเดตทันที
+							ช่องสต็อกทำงานแบบเพิ่มจากของเดิม ถ้าใส่ 10 และสินค้าเดิมมี 200 ระบบจะบันทึกเป็น 210 ในตาราง `products` แล้วรีเฟรชตารางสินค้าให้ทันที
 						</p>
+						{#if savingProduct || productSaveMessage}
+							<p class="helper-text">{savingProduct ? 'กำลังบันทึกข้อมูลสินค้า...' : productSaveMessage}</p>
+						{/if}
 					</div>
 				</div>
 			{/if}
